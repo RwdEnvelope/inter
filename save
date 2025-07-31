@@ -1,0 +1,86 @@
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+import sounddevice as sd
+import soundfile as sf
+import numpy as np
+import threading
+import queue
+import time
+import json
+from pathlib import Path
+from datetime import datetime
+import keyboard
+from recoder.audio_capture import *
+from agents.audio_agent import *
+
+
+# === 参数 ===
+AUDIO_SR = 16000
+CHUNK_DURATION = 5
+AUDIO_FRAME_COUNT = AUDIO_SR * CHUNK_DURATION
+
+# === 控制 ===
+exit_flag = threading.Event()
+audio_buffer = queue.Queue()
+recording_threads = []
+# === 创建输出路径 ===
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+audio_dir = Path(f"output/{timestamp}/video")
+audio_dir.mkdir(parents=True, exist_ok=True)
+
+# === 音频分析线程 ===
+def audio_consumer_worker(audio_buffer, output_dir):
+    print("[分析线程] 启动")
+    graph = build_audio_graph()
+    transcripts = []
+    analyses = []
+
+    while True:
+        try:
+            audio_path = audio_buffer.get(timeout=1)
+            if audio_path == "DONE":
+                print("[分析线程] 收到结束标志")
+                break
+
+            print(f"[分析线程] 处理：{audio_path}")
+            result = graph.invoke({"audio_path": audio_path})
+            transcripts.append({
+                "audio_path": audio_path,
+                "transcript": result.get("transcript", "")
+            })
+            analyses.append({
+                "audio_path": audio_path,
+                "audio_analysis": result.get("audio_analysis", {})
+            })
+        except queue.Empty:
+            if exit_flag.is_set():
+                break
+            else:
+                continue
+
+
+    # 写入 JSON 文件
+    with open(output_dir / "transcripts.json", "w", encoding="utf-8") as f:
+        json.dump(transcripts, f, ensure_ascii=False, indent=2)
+
+    with open(output_dir / "audio_analysis.json", "w", encoding="utf-8") as f:
+        json.dump(analyses, f, ensure_ascii=False, indent=2)
+
+    print("[分析线程] 结束")
+
+
+# === 外部控制接口 ===
+def start_recording():
+    exit_flag.clear()
+    print("🎙️ 开始录音...")
+    audio_thread = threading.Thread(target=audio_stream_worker, args=(audio_buffer, AUDIO_FRAME_COUNT, audio_dir))
+    analysis_thread = threading.Thread(target=audio_consumer_worker, args=(audio_buffer, audio_dir))
+    audio_thread.start()
+    analysis_thread.start()
+    recording_threads.extend([audio_thread, analysis_thread])
+
+def stop_recording():
+    print("🛑 收到前端退出信号，正在终止...")
+    wait_for_exit()
+    print(f"✅ 录音分析结束，结果已保存至：{audio_dir}")
