@@ -33,16 +33,16 @@ class AVController:
 
 global_av_controller = None
 
-@tool
-def start_av_recording_tool() -> str:
+
+def start_av_recording() -> str:
     """启动音视频采集"""
     global global_av_controller
     global_av_controller = AVController()
     global_av_controller.start()
     return "🎙️🎥 正在采集音视频..."
 
-@tool
-def stop_av_recording_tool() -> dict:
+def stop_av_recording() -> dict:
+    print("🟥 stop_record 节点被触发")
     """停止音视频采集并返回分析结果摘要"""
     global global_av_controller
     if global_av_controller:

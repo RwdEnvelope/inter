@@ -1,107 +1,108 @@
-import sys
+# graph/interview_flow_live.py
+from __future__ import annotations
+import sys, time
 from pathlib import Path
+from typing import TypedDict, List, Optional
+
+# 项目根路径
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from typing import TypedDict, Optional
-from langchain_core.messages import BaseMessage, HumanMessage
-from langgraph.graph import StateGraph, START, END
-from tools.analysis import start_av_recording_tool, stop_av_recording_tool
-from agents.question_agent import question_agent  # 已支持工具
-from langgraph.prebuilt import ToolNode
+# ==== 业务逻辑 ====
+from agents.question_agent import question_agent
+from tools.analysis   import start_av_recording, stop_av_recording
+from langchain_core.messages import AIMessage, HumanMessage, AnyMessage
 
-# 1. 定义状态结构
-class AgentState(TypedDict):
+# ==== LangGraph ====
+from langgraph.graph import StateGraph, START, END
+
+# ------------------ 状态 ------------------
+class InterviewState(TypedDict):
     resume: str
-    messages: list[BaseMessage]
     round: int
-    audio_summary: Optional[str]
-    video_summary: Optional[str]
-    audio_dir: Optional[str]
-    video_dir: Optional[str]
+    messages: List[AnyMessage]
     should_continue: bool
 
-# 2. 绑定工具节点
-start_tool_node = ToolNode([start_av_recording_tool])
-stop_tool_node = ToolNode([stop_av_recording_tool])
+    # 累积数据
+    qa_pairs:       List[tuple[str, str]]
+    audio_summaries: List[str]
+    video_summaries: List[str]
 
-# 3. 模拟前端按钮等待（实际可用轮询事件）
-def wait_for_user_click(state: AgentState):
-    input("🟡 等待用户答完题，按 Enter 停止录制...")
-    return {}
+# ------------------ 节点 ------------------
+def ask(state: InterviewState) -> InterviewState:
+    """面试官提问"""
+    return question_agent(state)
 
-# 4. 处理工具返回 observation（来自 stop_av_recording_tool）
-def extract_observation(state: AgentState, tool_output: dict) -> AgentState:
+def start_rec(state: InterviewState) -> InterviewState:
+    """一旦提问就开始录制"""
+    print("▶️ 正在录制音视频…（回答完按 Enter 停止）")
+    start_av_recording()
+    return {}  # 无需写回
+
+def listen_and_stop(state: InterviewState) -> InterviewState:
+    """展示问题→收答案→停止录制并分析"""
+    # 1. 打印面试官问题
+    ai_msg = next((m for m in state["messages"] if isinstance(m, AIMessage)), None)
+    question_text = ai_msg.content if ai_msg else "(问题丢失)"
+    print(f"\n面试官：{question_text}")
+
+    # 2. 候选人回答
+    answer_text = input("候选人：").strip()
+
+    # 3. 结束录制并拿分析结果
+    result = stop_av_recording()
+    print("✅ 录制/分析完成\n")
+
+    # 4. 返回增量：HumanMessage + QA + 摘要
     return {
-        **state,
-        "audio_summary": tool_output.get("audio_summary", ""),
-        "video_summary": tool_output.get("video_summary", ""),
-        "audio_dir": tool_output.get("audio_dir"),
-        "video_dir": tool_output.get("video_dir"),
+        "messages": [HumanMessage(content=answer_text)],
+        "qa_pairs": state.get("qa_pairs", []) + [(question_text, answer_text)],
+        "audio_summaries": state.get("audio_summaries", []) + [result.get("audio_summary", "")],
+        "video_summaries": state.get("video_summaries", []) + [result.get("video_summary", "")],
     }
 
-# 5. 提问节点（加上分析观察）
-def question_agent_node(state: AgentState) -> AgentState:
-    observation = (
-        f"[音频分析]：{state.get('audio_summary', '')}\n"
-        f"[视频分析]：{state.get('video_summary', '')}"
-        if state.get("audio_summary") else ""
-    )
+def need_more(state: InterviewState) -> bool:
+    """是否继续？"""
+    return state.get("should_continue", False) and state.get("round", 0) < 10
 
-    messages = state["messages"]
-    if observation:
-        messages.append(HumanMessage(content=observation))
+# ------------------ 构建 LangGraph ------------------
+g = StateGraph(InterviewState)
+g.add_node("ask",      ask)
+g.add_node("startrec", start_rec)
+g.add_node("listen",   listen_and_stop)
 
-    reply = question_agent.invoke(state)
+g.add_edge(START, "ask")
+g.add_conditional_edges("ask", need_more, {True: "startrec", False: END})
+g.add_edge("startrec", "listen")
+g.add_edge("listen",   "ask")
 
-    return {
-        **state,
-        "messages": messages + [reply["messages"][-1]],
-        "round": state["round"] + 1,
-        "should_continue": reply["should_continue"] and state["round"] < 9
-    }
+interview_graph = g.compile()
 
-# 6. 条件边：是否继续
-def route_decision(state: AgentState) -> str:
-    return "continue" if state["should_continue"] else "end"
-
-# 7. 构建 LangGraph 流程
-builder = StateGraph(AgentState)
-
-builder.add_node("question", question_agent_node)
-builder.add_node("start_tool", start_tool_node)
-builder.add_node("wait_for_click", wait_for_user_click)
-builder.add_node("stop_tool", stop_tool_node)
-builder.add_node("update_observation", extract_observation)
-
-builder.set_entry_point("question")
-builder.add_edge("question", "start_tool")
-builder.add_edge("start_tool", "wait_for_click")
-builder.add_edge("wait_for_click", "stop_tool")
-builder.add_edge("stop_tool", "update_observation")
-
-builder.add_conditional_edges(
-    "update_observation",
-    route_decision,
-    {
-        "continue": "question",
-        "end": END
-    }
-)
-
-graph = builder.compile()
-
-# 8. 启动测试用初始状态（第 0 轮自我介绍）
+# ------------------ CLI 演示 ------------------
 if __name__ == "__main__":
-    init_state: AgentState = {
-        "resume": "姓名：张三\n学历：计算机科学与技术本科\n经历：在腾讯实习过，做过大模型微调项目。",
-        "messages": [HumanMessage(content="请做一次自我介绍")],
+    sample_resume = """姓名：Alice
+学历：计算机科学本科
+经历：阿里巴巴推荐系统实习 6 个月
+技能：Python / PyTorch"""
+
+    init_state: InterviewState = {
+        "resume": sample_resume,
         "round": 0,
-        "audio_summary": "",
-        "video_summary": "",
-        "audio_dir": None,
-        "video_dir": None,
-        "should_continue": True
+        "messages": [],
+        "should_continue": True,
+        "qa_pairs": [],
+        "audio_summaries": [],
+        "video_summaries": [],
     }
 
-    final_state = graph.invoke(init_state)
-    print("✅ 面试流程已结束")
+    final = interview_graph.invoke(init_state)
+
+    # ===== 整场结果展示 =====
+    print("\n=== 面试结束，完整问答回顾 ===")
+    for i, (q, a) in enumerate(final["qa_pairs"], 1):
+        print(f"\n【第{i}问】{q}\n【答】{a}")
+
+    print("\n📝 全场音频摘要：")
+    print("\n".join(filter(None, final.get("audio_summaries", []))) or "无")
+
+    print("\n🎞️ 全场视频摘要：")
+    print("\n".join(filter(None, final.get("video_summaries", []))) or "无")

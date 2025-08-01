@@ -104,22 +104,37 @@ class RecorderController:
         print("✅ 所有线程结束")
         return str(self.output_dir)
     def get_summary(self) -> str:
+        """把全部 transcript 拼成一段；把全部 emotion 拼成一段"""
+
         transcript_path = self.output_dir / "transcripts.json"
-        analysis_path = self.output_dir / "audio_analysis.json"
+        analysis_path   = self.output_dir / "audio_analysis.json"
 
         if not transcript_path.exists():
             return "未找到语音转录结果"
 
+        # 1. 读取文件
         with open(transcript_path, "r", encoding="utf-8") as f:
             transcripts = json.load(f)
         with open(analysis_path, "r", encoding="utf-8") as f:
             analyses = json.load(f)
 
-        summary_lines = []
-        for t, a in zip(transcripts, analyses):
-            text = t.get("transcript", "")
-            emotion = a.get("audio_analysis", {})
-            summary_lines.append(f"🎙️ {text}（情绪：{emotion}）")
+        # 2. 拼接所有文字
+        full_text = " ".join(
+            t.get("transcript", "").strip() for t in transcripts if t.get("transcript", "").strip()
+        )
 
-        return "\n".join(summary_lines)
+        # 3. 汇总所有情绪（dict → "key:val"）
+        emotion_items = []
+        for a in analyses:
+            emo = a.get("audio_analysis", {})
+            if isinstance(emo, dict):
+                emotion_items.extend(f"{k}:{v}" for k, v in emo.items())
+            elif emo:
+                emotion_items.append(str(emo))
+
+        emotion_summary = "；".join(emotion_items) if emotion_items else "无"
+
+    # 4. 返回两段式摘要
+        return f"🎙️ {full_text}\n情绪：{emotion_summary}"
+
 
