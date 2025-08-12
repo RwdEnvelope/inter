@@ -123,7 +123,6 @@ class RecorderController:
             t.get("transcript", "").strip() for t in transcripts if t.get("transcript", "").strip()
         )
 
-        # 3. 汇总所有情绪（dict → "key:val"）
         emotion_items = []
         for a in analyses:
             emo = a.get("audio_analysis", {})
@@ -135,6 +134,6 @@ class RecorderController:
         emotion_summary = "；".join(emotion_items) if emotion_items else "无"
 
     # 4. 返回两段式摘要
-        return f"🎙️ {full_text}\n情绪：{emotion_summary}"
+        return f"语音内容: {full_text}\n情绪分析: {emotion_summary}"
 
 
